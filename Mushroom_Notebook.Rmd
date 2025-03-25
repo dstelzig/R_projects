@@ -1,0 +1,348 @@
+---
+title: "R Notebook of Mushroom Classification"
+author: "David Stelzig"
+output: html_notebook
+---
+
+# Introduction
+
+This is an R Notebook that demonstrates the basic analysis and classification of the mushroom dataset: Mushroom [Dataset]. (1981). UCI Machine Learning Repository. <https://doi.org/10.24432/C5959T>.
+
+## Dataset
+
+The data contain 23 characteristic features of different mushrooms, including odor, bruises and more. The main target feature is the **poisonous** class.
+
+## Topics
+
+The notebook includes the following steps:
+
+-   Import of libraries, loading the data and **cleaning** the data (missing values, near-zero variation features, useless columns, ...)
+-   **Exploratory Data Analysis**
+-   **Training** of a Random Forest Model to classify mushrooms
+
+# 1. Load Libraries and import the data
+
+```{r}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(ggplot2)
+library(DataExplorer)
+
+
+
+mushroom_data <- read.csv("C:/Users/Sabrina/OneDrive/Desktop/David_work/R/mushrooms.csv")
+head(mushroom_data)
+
+```
+
+# 2. Data Cleaning and Processing
+
+```{r}
+# Check for missing values
+colSums(is.na(mushroom_data))
+
+# Check data structure
+str(mushroom_data)
+
+```
+
+The dataset does not contain missing values and all classes are characters. Problem: For downstream *Machine Learning* models, the data need to be converted to numerical features.
+
+```{r}
+# Downstream machine learning models require categorical values to be converted to numerical features
+mushroom <- mushroom_data %>%
+  mutate_if(is.character, as.factor)
+
+#statistics
+summary(mushroom)
+```
+
+Inspection of the data is helpful to characterize useless columns. In this case, the class **veil.type** is useless because it only contains one value. Another isse can be columns with a very skewed population towards one value. One example could be the class gill.attachment, since it contain 7914 f and only 2100 a values. Use the near-zero variation feature method in R to obtain these critical columns and drop them because they can lead to *overfitting* and can complicate *model interpretability*.
+
+```{r}
+#Drop columns with only one category
+mushroom <- mushroom %>% select_if(~ n_distinct(.) > 1)
+
+
+# Identify near-zero variance features
+# NZV features usually only display minimal variability
+nzv_features <- nearZeroVar(mushroom, saveMetrics = TRUE)
+
+# Display features with near-zero variance
+nzv_features[nzv_features$nzv, ]
+```
+
+As expected, **gill.attachment** and **veil.color** are citical columns that should be dropped.
+
+```{r}
+# Remove near-zero variance features
+mushroom <- mushroom[, !nzv_features$nzv]
+head(mushroom)
+```
+
+The data are now ready for further analysis.
+
+## 3. Exploratory Data Analysis and Visualization
+
+One of the first things to check is the distribution of the target class **poisonous**. If the population is very imbalanced, then other techniques need to be applied to rebalance the dataset. A good visualization is the bar plot.
+
+```{r}
+library(ggplot2)
+
+ggplot(mushroom, aes(x = class)) +
+  geom_bar(fill = c("#030e45", "#648fff"), color = "black", linewidth = 0.5, alpha = 0.6) +
+  labs(
+    title = "Distribution of Edible vs. Poisonous Mushrooms",
+    x = "Mushroom Class",
+    y = "Number of Mushrooms"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "whitesmoke")
+  ) +
+  geom_text(stat = 'count', aes(label = scales::percent(..count../sum(..count..))), vjust = 10)
+```
+
+-\> The dataset is balanced!
+
+A next steo would be to check the correlation between categorical features and **poisonous** using a heatmap. However, correlations are not useful for categorical features. -\> Cramer's V is used as a measure of association for categorical data.
+
+```{r}
+cramerV <- function(x, y) {
+  tab <- table(x, y)
+  chi2 <- chisq.test(tab)$statistic
+  n <- sum(tab)
+  min_dim <- min(dim(tab)) - 1
+  sqrt(chi2 / (n * min_dim))
+}
+
+cramer_matrix <- matrix(NA, nrow = ncol(mushroom) - 1, ncol = 1)
+rownames(cramer_matrix) <- colnames(mushroom)[-1]
+colnames(cramer_matrix) <- "Cramer's V"
+
+for (i in 2:ncol(mushroom)) {
+  cramer_matrix[i - 1, 1] <- cramerV(mushroom$class, mushroom[, i])
+}
+
+cramer_matrix <- as.data.frame(cramer_matrix)
+head(cramer_matrix)
+```
+
+-\> Create a barplot that shows the importance of each feature
+
+```{r}
+ggplot(cramer_matrix, aes(x = reorder(rownames(cramer_matrix), `Cramer's V`), 
+                          y = `Cramer's V`, fill = `Cramer's V`)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.9) +
+  coord_flip() +
+  scale_fill_gradient(low = "#AED6F1", high = "#030e45") + 
+  labs(
+    title = "Cramer's V: Feature Importance",
+    x = "Features",
+    y = "Cramer's V",
+    fill = "Cramer's V"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  geom_text(aes(label = round(`Cramer's V`, 2)), hjust = -0.2, size = 3)
+```
+
+Create the corresponding heatmap:
+
+```{r}
+library(ggcorrplot)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+# Create a correlation matrix (Cramer's V) for all pairs of categorical variables
+cramer_matrix <- matrix(NA, nrow = ncol(mushroom), ncol = ncol(mushroom))  # Including 'class'
+rownames(cramer_matrix) <- colnames(mushroom)
+colnames(cramer_matrix) <- colnames(mushroom)
+
+# Loop through each pair of variables to calculate Cramer's V
+for (i in 1:ncol(mushroom)) {
+  for (j in i:ncol(mushroom)) {
+    cramer_matrix[i, j] <- cramerV(mushroom[, i], mushroom[, j])
+    cramer_matrix[j, i] <- cramer_matrix[i, j]  # Symmetric matrix
+  }
+}
+
+# Convert the matrix to a data frame
+cramer_matrix_df <- as.data.frame(cramer_matrix)
+
+# Pivot the data to a longer format for ggplot
+cramer_matrix_melted <- cramer_matrix_df %>%
+  rownames_to_column(var = "Variable1") %>%
+  pivot_longer(cols = -Variable1, names_to = "Variable2", values_to = "CramersV")
+
+# Check the structure of the melted data
+str(cramer_matrix_melted)
+
+# Plot the heatmap
+ggplot(cramer_matrix_melted, aes(Variable1, Variable2, fill = CramersV)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "white", high = "#030e45", mid = "#AED6F1", midpoint = 0.2) +
+  geom_text(aes(label = round(CramersV, 2)), color = "white", size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Cramer's V Heatmap",
+    x = "Variables",
+    y = "Variables",
+    fill = "Cramer's V"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+##Result
+
+Given the two visualization it is easy to see that features like **odor**, **spore.print.color** and **gill.color** correlate with class.
+
+Create barplots to check the distribution of the features for each class.
+
+A)  Relationship between class and spore print color
+
+```{r}
+ggplot(mushroom, aes(x = spore.print.color, fill = class)) +
+  geom_bar(position = "dodge", color = "black", alpha = 0.8) +
+  scale_fill_manual(values = c("#030e45", "#648fff")) +
+  labs(
+    title = "Distribution of Spore Print Color by Class",
+    x = "Spore Print Color",
+    y = "Count",
+    fill = "Mushroom Class"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+B)  Relationship between class and odor
+
+```{r}
+ggplot(mushroom, aes(x = odor, fill = class)) +
+  geom_bar(position = "dodge", color = "black", alpha = 0.8) +
+  scale_fill_manual(values = c("#030e45", "#648fff")) +
+  labs(
+    title = "Distribution of Odor by Class",
+    x = "Odor",
+    y = "Count",
+    fill = "Mushroom Class"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+C)  Relationship between class and gill.color
+
+```{r}
+ggplot(mushroom, aes(x = gill.color, fill = class)) +
+  geom_bar(position = "dodge", color = "black", alpha = 0.8) +
+  scale_fill_manual(values = c("#030e45", "#648fff")) +
+  labs(
+    title = "Distribution of Gill Color by Class",
+    x = "Gill Color",
+    y = "Count",
+    fill = "Mushroom Class"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+The plots demonstrate that these three classes are not evenly distributed and several categories only belong to edible or poisonous.
+
+# 4. Model Building, Machine Learning and Evalution
+
+Given the kind of data (categorical) a classification model is best suited for the analysis.
+
+## 4.1 Split the data
+
+```{r}
+# Split data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(mushroom$class, p = 0.8, list = FALSE)
+train_data <- mushroom_data[trainIndex, ]
+test_data <- mushroom_data[-trainIndex, ]
+
+# Ensure class is factor
+train_data$class <- as.factor(train_data$class)
+test_data$class <- as.factor(test_data$class)
+str(train_data$class)
+```
+
+Class is now converted to numerical features.
+
+## 4.2 Train the model (**Randon Forest**)
+
+```{r}
+# Train a Random Forest model
+rf_model <- randomForest(class ~ ., data = train_data, importance = TRUE)
+
+# Evaluate the model on the test set
+rf_predictions <- predict(rf_model, test_data)
+confusionMatrix(rf_predictions, test_data$class)
+```
+
+##Evaluation
+
+The model already performs perfectly. The accuracy is 1 and the p-Value of \< 2.2 e-16 is much smaller than the NIR of 0.5179 (random guessing).
+
+Analyze the feature importance:
+
+```{r}
+importance(rf_model)
+```
+
+Plot:
+
+```{r}
+varImpPlot(rf_model,
+           main = "Random Forest Variable Importance",
+           pch = 16)
+```
+
+Result:
+
+Similar to the feature importance analysis from above the classes spore.print.color, odor, gill.size and gill.color have the largest importance on the classification.
+
+
+# 5. Interpretation and Conclusion
+
+- The Random Forest achieved very high accuracy, indicating that the mushroom classification problem is well-defined.
+- Odor, gill size and gill color are a strong predictors.
+- Some features have a very strong association with class, as shown in the Cramer's V calculations.
+- The data is relatively clean, with no missing values but two columns with near-zero variance predictors were dropped.
+- No further hyperparameter tuning needed.
+- Other models were not tested since RF performed perfectly.
+
