@@ -1,0 +1,412 @@
+---
+title: "R Notebook of Concrete regression"
+author: "David Stelzig"
+output: html_notebook
+---
+
+# Introduction
+
+This is an R Notebook that demonstrates the basic analysis and regression of the concrete dataset: 
+Yeh, I. (1998). Concrete Compressive Strength [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C5PK67.
+
+## Dataset
+
+The data contain 8 characteristic, numeric features contributing to the target variable *concrete compressive strength*, including cement, water, Superplasticizer and more.
+
+## Topics
+
+The notebook includes the following steps:
+
+-   Import of libraries, loading the data and **cleaning** the data (missing values, useless columns, duplicates ...)
+-   **Exploratory Data Analysis**
+-   **Training** of a different regression models and multi-component analysis
+
+# 1. Load Libraries and import the data
+```{r}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(e1071)
+library(ggplot2)
+library(corrplot)
+library(gbm)
+library(class)
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(GGally)
+concrete_data <- read_excel("C:/Users/Sabrina/OneDrive/Desktop/David_work/R/Concrete_Data.xls")
+
+head(concrete_data)
+```
+Rename the columns for better readability:
+
+```{r}
+colnames(concrete_data) <- c("Cement", "BlastFurnaceSlag", "FlyAsh", "Water", "Superplasticizer", 
+                             "CoarseAggregate", "FineAggregate", "Age", "Strength")
+head(concrete_data)
+```
+# 2. Inspect the data, data Cleaning and Preprocessing
+```{r}
+str(concrete_data)
+```
+The dataset contain 1030 entries with only numerical values.
+```{r}
+summary(concrete_data)
+```
+Check for missing values
+```{r}
+colSums(is.na(concrete_data))
+```
+The dataset does **not** contain missing values.
+Check for duplicates and remove them:
+```{r}
+duplicates <- concrete_data[duplicated(concrete_data), ]
+concrete_data <- concrete_data %>% distinct()
+str(concrete_data)
+```
+The dataset contained **25 duplicates**. After dropping them 1005 entries remain.
+
+# 3. Exploratory Data Analysis
+
+Check the overall correlation and distribution of the data
+```{r}
+library(ggplot2)
+ggpairs(concrete_data,
+        columns = 1:9,
+        lower = list(continuous = wrap("points", alpha = 0.5, size = 1.8, color = "#030e45")),
+        upper = list(continuous = wrap("cor", size = 4, color = "#648fff", display_grid = FALSE)),
+        axisLabels = "show") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 6, face = "bold"),
+        axis.text = element_text(size = 6))
+```
+At first glance it is easy to extract the following correlation:
+- positive correlation between **Cement** and **Strength**
+- positive correlation between **Strength** and **Age**
+- positive correlation between **Strength** and **Superplasticizer**
+- Negative correlation between **Water** and **Superplasticizer**
+- Negative correlation between **Water** and **FineAggregate**
+
+Compute a correlation matrix for better visualization:
+```{r}
+cor_matrix <- cor(concrete_data)
+corrplot::corrplot(cor_matrix,
+                   method = "color",
+                   type = "upper",
+                   tl.cex = 0.8,
+                   number.cex = 0.7,
+                   addCoef.col = "white",
+                   tl.col = "#240046",
+                   number.digits = 2,
+                   col = colorRampPalette(c("#240046", "#3c096c", "#5a189a","#7b2cbf","#9d4edd","#c77dff"))(200),
+                   bg = "white",
+                   outline = "#240046",
+                   tl.srt = 45,
+                   cl.cex = 0.8,
+                   cl.align.text = "l")
+```
+Check the correlation between **Age** and **Strength**:
+```{r}
+ggplot(concrete_data, aes(x = Age, y = Strength)) +
+  geom_point(alpha = 0.7, size = 2.5, color = "#00b4d8") +  # Enhanced points
+  geom_smooth(method = "loess", color = "#030e45", fill = "#648fff", alpha = 0.4, linewidth = 1.2) + # Enhanced smooth line
+  labs(title = "Concrete Strength vs. Age",
+       x = "Age (days)",
+       y = "Strength (MPa)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        panel.grid.major = element_line(color = "#e0e0e0", linewidth = 0.2),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white"))
+```
+Visually it looks like the relationship is not perfectly linear.
+
+# 4.Machine Learning Models
+
+## Question 1: Can we predict the strength based on other variables? -> **Regression**
+```{r}
+# Split data into training and testing sets
+set.seed(123)  # For reproducibility
+train_indices <- sample(seq_len(nrow(concrete_data)), size = 0.8 * nrow(concrete_data))
+train_data <- concrete_data[train_indices, ]
+test_data <- concrete_data[-train_indices, ]
+```
+### Linear Regression
+```{r}
+linear_model <- lm(Strength ~ ., data = train_data)
+summary(linear_model)
+
+linear_predictions <- predict(linear_model, newdata = test_data)
+print(paste("Linear Regression RMSE:", RMSE(linear_predictions, test_data$Strength)))
+r2_lr_model <- cor(test_data$Strength, linear_predictions)^2
+print(paste("Linear Regression RMSE R²:", round(r2_lr_model, 3)))
+```
+The model performs mediocre with an R2 of 0.595.
+Create visualization to check the deviations between actual data and the fit.
+```{r}
+ggplot(test_data, aes(x = Strength, y = linear_predictions)) +
+  geom_point(alpha = 0.7, size = 2.5, color = "#00b4d8") +  # Enhanced points
+  geom_abline(intercept = 0, slope = 1, color = "#030e45", linewidth = 1.2, linetype = "dashed") + # Enhanced abline
+  labs(title = "Actual vs. Predicted Strength",
+       x = "Actual Strength (MPa)",
+       y = "Predicted Strength (MPa)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        panel.grid.major = element_line(color = "#e0e0e0", linewidth = 0.2),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white"))
+```
+```{r}
+# Compute residuals
+residuals <- test_data$Strength - predict(linear_model, newdata = test_data)
+
+# Create residual plot
+ggplot(data.frame(Predicted = predict(linear_model, newdata = test_data), Residuals = residuals), 
+       aes(x = Predicted, y = Residuals)) +
+  geom_point(alpha = 0.7, color = "#7209b7", size = 2.5) +
+  geom_hline(yintercept = 0, color = "#030e45", linetype = "dashed",linewidth = 1.2,) +
+  labs(title = "Residual Plot", x = "Predicted Strength (MPa)", y = "Residuals") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14))
+```
+It is apparent that the model doesn't perform perfectly.
+Try other.
+
+### Random Forest Regression
+```{r}
+rf_model_reg <- randomForest(Strength ~ ., data = train_data)
+rf_predictions_reg <- predict(rf_model_reg, newdata = test_data)
+print(paste("Random Forest RMSE:", RMSE(rf_predictions_reg, test_data$Strength)))
+r2_rf_model <- cor(test_data$Strength, rf_predictions_reg)^2
+print(paste("Random Forest R²:", round(r2_rf_model, 3)))
+```
+Random Forest performs much better with an R2 of 0.916.
+```{r}
+ggplot(test_data, aes(x = Strength, y = rf_predictions_reg)) +
+  geom_point(alpha = 0.7, size = 2.5, color = "#52b788") +  # Enhanced points
+  geom_abline(intercept = 0, slope = 1, color = "#1b4332", linewidth = 1.2, linetype = "dashed") + # Enhanced abline
+  labs(title = "Actual vs. Predicted Strength",
+       x = "Actual Strength (MPa)",
+       y = "Predicted Strength (MPa)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        panel.grid.major = element_line(color = "#e0e0e0", linewidth = 0.2),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white"))
+```
+```{r}
+residuals_rf <- test_data$Strength - predict(rf_model_reg, newdata = test_data)
+
+# Create residual plot
+ggplot(data.frame(Predicted = predict(rf_model_reg, newdata = test_data), Residuals = residuals_rf), 
+       aes(x = Predicted, y = Residuals)) +
+  geom_point(alpha = 0.7, color = "#52b788", size = 2.5) +
+  geom_hline(yintercept = 0, color = "#1b4332", linetype = "dashed",linewidth = 1.2,) +
+  labs(title = "Residual Plot", x = "Predicted Strength (MPa)", y = "Residuals") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14))
+
+```
+###Gradient Boosting Regression
+```{r}
+gbm_model_reg <- gbm(Strength ~ ., data = train_data, distribution = "gaussian", n.trees = 100, interaction.depth = 3, shrinkage = 0.1)
+gbm_predictions_reg <- predict(gbm_model_reg, newdata = test_data, n.trees = 100)
+print(paste("GBM RMSE:", RMSE(gbm_predictions_reg, test_data$Strength)))
+r2_gbm_model <- cor(test_data$Strength, gbm_predictions_reg)^2
+print(paste("Random Forest R²:", round(r2_gbm_model, 3)))
+```
+
+```{r}
+ggplot(test_data, aes(x = Strength, y = gbm_predictions_reg)) +
+  geom_point(alpha = 0.7, size = 2.5, color = "#ad2831") +  # Enhanced points
+  geom_abline(intercept = 0, slope = 1, color = "#38040e", linewidth = 1.2, linetype = "dashed") + # Enhanced abline
+  labs(title = "Actual vs. Predicted Strength",
+       x = "Actual Strength (MPa)",
+       y = "Predicted Strength (MPa)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        panel.grid.major = element_line(color = "#e0e0e0", linewidth = 0.2),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white"))
+```
+Given the three tested models, **Random Forest** performed best and will be used further. 
+However, for other data it might be wise to test also other regression models.
+
+### Feature Importance Analysis
+```{r}
+importance(rf_model_reg)
+varImpPlot(rf_model_reg)
+```
+**Age**, **Cement** and **Water** have the most significant effect on the outcome of the model.
+
+### Model Optimization
+
+```{r}
+# Tuning Random Forest Hyperparameters
+set.seed(123)
+best_mtry <- tuneRF(train_data[, -9], train_data$Strength, stepFactor = 1.5, improve = 0.01, trace = TRUE)
+
+set.seed(123)
+rf_model <- randomForest(Strength ~ ., 
+                         data = train_data, 
+                         mtry = 4, 
+                         ntree = 2000,  
+                         nodesize = 3,  
+                         importance = TRUE)  
+```
+Given the **tuneRF** function and the output of a minimum mtry value of 4, the randomForest model will be trained with the optimized parameters.
+
+```{r}
+# Predictions on the test set
+predictions_rf <- predict(rf_model, newdata = test_data)
+
+# Compute R² and RMSE
+r2_rf <- cor(test_data$Strength, predictions_rf)^2
+rmse_rf <- sqrt(mean((predictions_rf - test_data$Strength)^2))
+
+
+print(paste("Optimized Random Forest R²:", round(r2_rf, 3)))
+print(paste("Optimized Random Forest RMSE:", round(rmse_rf, 3)))
+print(paste("Random Forest RMSE:", RMSE(rf_predictions_reg, test_data$Strength)))
+print(paste("Random Forest R²:", round(r2_rf_model, 3)))
+```
+**Hyperparameter Tuning** has helped to improve the accuracy of the model.
+```{r}
+ggplot(test_data, aes(x = Strength, y = predictions_rf)) +
+  geom_point(alpha = 0.7, size = 2.5, color = "#52b788") +
+  geom_abline(intercept = 0, slope = 1, color = "#1b4332", linewidth = 1.2, linetype = "dashed") +
+  labs(title = "Actual vs. Predicted Strength",
+       x = "Actual Strength (MPa)",
+       y = "Predicted Strength (MPa)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        panel.grid.major = element_line(color = "#e0e0e0", linewidth = 0.2),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white"))
+```
+
+## Question 2:  How do different material compositions (e.g., Cement vs. Fly Ash vs. Blast Furnace Slag) interact to influence strength? 
+```{r}
+rf_model <- randomForest(Strength ~ ., data = train_data, importance = TRUE)
+importance(rf_model)
+varImpPlot(rf_model)
+```
+```{r}
+library(pdp)
+# Partial dependence of Cement
+cement_pdp <- partial(rf_model, pred.var = "Cement")
+plot(cement_pdp)
+```
+**Increasing** the Cement content generally leads to increased *Strength*.
+```{r}
+#Partial dependence of Water
+Water_pdp <- partial(rf_model, pred.var = "Water")
+plot(Water_pdp)
+```
+**Water content** should be reduced.
+
+Check for partial dependence of water and cement.
+
+```{r}
+interaction_pdp <- partial(rf_model, pred.var = c("Cement", "Water"))
+ggplot(interaction_pdp, aes(x = Cement, y = Water, z = yhat)) +
+  geom_tile(aes(fill = yhat), color = "white") +
+  scale_fill_viridis_c(option = "C") +
+  labs(title = "Interaction Between Cement and Water on Compressive Strength",
+       subtitle = "Partial Dependence Plot (PDP)",
+       x = "Cement Content",
+       y = "Water Content",
+       fill = "Predicted Strength") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  ) +
+  theme(legend.position = "right")
+
+```
+Check for partial dependence of Age and cement.
+
+
+```{r}
+interaction_pdp <- partial(rf_model, pred.var = c("Cement", "Age"))
+ggplot(interaction_pdp, aes(x = Cement, y = Age, z = yhat)) +
+  geom_tile(aes(fill = yhat), color = "white") +
+  scale_fill_viridis_c(option = "viridis") +
+  labs(title = "Interaction Between Cement and Age on Compressive Strength",
+       subtitle = "Partial Dependence Plot (PDP)",
+       x = "Cement Content",
+       y = "Age",
+       fill = "Predicted Strength") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  ) +
+  theme(legend.position = "right")
+```
+## Question 3: How much does a Suplerplasticizer help? At what point does adding Superplasticizer not help anymore?
+
+```{r}
+superplasticizer_pdp <- partial(rf_model, pred.var = "Superplasticizer")
+plot(superplasticizer_pdp)
+range(concrete_data$Superplasticizer)
+
+min_strength <- superplasticizer_pdp$yhat[which.min(superplasticizer_pdp$Superplasticizer)]
+max_strength <- superplasticizer_pdp$yhat[which.max(superplasticizer_pdp$Superplasticizer)]
+
+# Calculate the difference
+strength_increase <- max_strength - min_strength
+print(paste("Strength increase due to superplasticizer:", strength_increase))
+```
+```{r}
+interaction_pdp <- partial(rf_model, pred.var = c("Water", "Superplasticizer"))
+ggplot(interaction_pdp, aes(x = Water, y = Superplasticizer, z = yhat)) +
+  geom_tile(aes(fill = yhat), color = "white") +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "Interaction Between Cement and Age on Compressive Strength",
+       subtitle = "Partial Dependence Plot (PDP)",
+       x = "Water Content",
+       y = "Superplasticizer",
+       fill = "Predicted Strength") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  ) +
+  theme(legend.position = "right")
+```
+Given the visualizations from above the water content can be kept minimum when using a superplasticizer. However, the use of the superplasticizer can be limited to ~ 15(component 5)(kg in a m^3 mixture) to achieve a high strength.
+
